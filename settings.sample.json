@@ -1,0 +1,90 @@
+{
+  "translator_type": "LLM_API_Translator",
+  "source_lang": "ja",
+  "target_lang": "ko",
+  "deepl": {
+    "api_key": "",
+    "delay": 0.0,
+    "formality": "default",
+    "context": "",
+    "preserve_formatting": "disabled"
+  },
+  "deepl_free": {
+    "api_key": "",
+    "delay": 0.0,
+    "formality": "default",
+    "context": "",
+    "preserve_formatting": "disabled"
+  },
+  "google": {
+    "delay": 0.3
+  },
+  "papago": {
+    "client_id": "",
+    "client_secret": "",
+    "delay": 0.0
+  },
+  "llm": {
+    "provider": "OpenAI",
+    "api_key": "",
+    "multiple_keys": "",
+    "model": "gpt-5-mini",
+    "override_model": "",
+    "endpoint": "",
+    "system_prompt": "You are an expert translator. Translate the given text accurately.",
+    "invalid_repeat_count": 2,
+    "max_requests_per_minute": 60,
+    "delay": 0.3,
+    "max_tokens": 1024,
+    "temperature": 0.1,
+    "top_p": 1.0,
+    "retry_attempts": 3,
+    "retry_timeout": 15.0,
+    "proxy": "",
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+    "provider_profiles": {
+      "openai": {
+        "api_key": "",
+        "multiple_keys": "",
+        "model": "gpt-5-mini",
+        "override_model": "",
+        "endpoint": "",
+        "system_prompt": "You are an expert translator. Translate the given text accurately.",
+        "invalid_repeat_count": 2,
+        "max_requests_per_minute": 60,
+        "delay": 0.3,
+        "max_tokens": 1024,
+        "temperature": 0.1,
+        "top_p": 1.0,
+        "retry_attempts": 3,
+        "retry_timeout": 15.0,
+        "proxy": "",
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0
+      },
+      "google": {
+        "api_key": "",
+        "multiple_keys": "",
+        "model": "gemini-2.5-flash-lite",
+        "override_model": "",
+        "endpoint": "",
+        "system_prompt": "You are an expert translator. Translate the given text accurately.",
+        "invalid_repeat_count": 2,
+        "max_requests_per_minute": 60,
+        "delay": 0.3,
+        "max_tokens": 1024,
+        "temperature": 0.1,
+        "top_p": 1.0,
+        "retry_attempts": 3,
+        "retry_timeout": 15.0,
+        "proxy": "",
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0
+      }
+    }
+  },
+  "stt": {
+    "backend": "cuda"
+  }
+}
