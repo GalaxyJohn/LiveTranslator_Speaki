@@ -46,17 +46,49 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
     except Exception:
         return inputs, outputs
 
+    def _clean(name: str) -> str:
+        return " ".join(name.strip().split())
+
     pa = pyaudio.PyAudio()
     try:
+        preferred_host_api: int | None = None
+        for api_idx in range(pa.get_host_api_count()):
+            api_info = pa.get_host_api_info_by_index(api_idx)
+            api_name = str(api_info.get("name", "")).lower()
+            if "wasapi" in api_name:
+                preferred_host_api = int(api_idx)
+                break
+
+        if preferred_host_api is None:
+            try:
+                preferred_host_api = int(pa.get_default_host_api_info().get("index", -1))
+                if preferred_host_api < 0:
+                    preferred_host_api = None
+            except Exception:
+                preferred_host_api = None
+
+        seen_inputs: set[str] = set()
+        seen_outputs: set[str] = set()
+
         for idx in range(pa.get_device_count()):
             info = pa.get_device_info_by_index(idx)
-            name = str(info.get("name", "")).strip() or "Unknown device"
-            label = f"[{idx}] {name}"
+            host_api = int(info.get("hostApi", -1))
+            if preferred_host_api is not None and host_api != preferred_host_api:
+                continue
 
-            if int(info.get("maxInputChannels", 0)) > 0:
-                inputs.append((label, int(idx)))
+            name = _clean(str(info.get("name", "") or "Unknown device"))
+            name_key = name.lower()
+            is_loopback = "loopback" in name_key
+
+            if int(info.get("maxInputChannels", 0)) > 0 and not is_loopback:
+                if name_key not in seen_inputs:
+                    inputs.append((name, int(idx)))
+                    seen_inputs.add(name_key)
+
             if int(info.get("maxOutputChannels", 0)) > 0:
-                outputs.append((label, int(idx)))
+                if name_key not in seen_outputs:
+                    outputs.append((name, int(idx)))
+                    seen_outputs.add(name_key)
     except Exception:
         return [], []
     finally:
@@ -65,6 +97,8 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
         except Exception:
             pass
 
+    inputs.sort(key=lambda x: x[0].lower())
+    outputs.sort(key=lambda x: x[0].lower())
     return inputs, outputs
 
 
@@ -629,11 +663,11 @@ class SettingsDialog(QDialog):
         self.stt_backend_combo.addItem("CPU (compatible)", "cpu")
         t_layout.addWidget(self.stt_backend_combo, 2, 1)
 
-        t_layout.addWidget(QLabel("Input device"), 3, 0)
+        t_layout.addWidget(QLabel("Input device (Windows)"), 3, 0)
         self.input_device_combo = QComboBox()
         t_layout.addWidget(self.input_device_combo, 3, 1)
 
-        t_layout.addWidget(QLabel("Output device"), 3, 2)
+        t_layout.addWidget(QLabel("Output device (Windows)"), 3, 2)
         self.output_device_combo = QComboBox()
         t_layout.addWidget(self.output_device_combo, 3, 3)
 
@@ -668,14 +702,14 @@ class SettingsDialog(QDialog):
         self.input_device_combo.clear()
         self.output_device_combo.clear()
 
-        self.input_device_combo.addItem("System default", -1)
-        self.output_device_combo.addItem("System default", -1)
+        self.input_device_combo.addItem("Windows default input", -1)
+        self.output_device_combo.addItem("Windows default output", -1)
 
         for label, idx in self._audio_inputs:
-            self.input_device_combo.addItem(label, idx)
+            self.input_device_combo.addItem(f"Input: {label}", idx)
 
         for label, idx in self._audio_outputs:
-            self.output_device_combo.addItem(label, idx)
+            self.output_device_combo.addItem(f"Output: {label}", idx)
 
     def _combo_data_to_int(self, combo: QComboBox, default: int = -1) -> int:
         value = combo.currentData()
@@ -760,4 +794,7 @@ class SettingsDialog(QDialog):
         self.google_page.apply(s.google)
         self.papago_page.apply(s.papago)
         self.llm_page.apply(s.llm)
+
+
+
 

@@ -42,7 +42,7 @@ class STTConfig:
     beam_size: int = 5
     beam_size_realtime: int = 3
 
-    silero_use_onnx: bool = True
+    silero_use_onnx: bool = False
     faster_whisper_vad_filter: bool = False
 
     spinner: bool = False
@@ -212,7 +212,25 @@ class STTEngine:
         if input_device_index is not None:
             recorder_config["input_device_index"] = int(input_device_index)
 
-        self._recorder = AudioToTextRecorder(**recorder_config)
+        try:
+            self._recorder = AudioToTextRecorder(**recorder_config)
+        except Exception as exc:
+            msg = str(exc)
+            is_onnx_issue = (
+                "ONNXRuntimeError" in msg
+                or "NO_SUCHFILE" in msg
+                or "onnx" in msg.lower()
+            )
+            if recorder_config.get("silero_use_onnx") and is_onnx_issue:
+                logger.warning(
+                    "Silero ONNX init failed, retrying without ONNX backend: %s",
+                    msg,
+                )
+                retry_config = dict(recorder_config)
+                retry_config["silero_use_onnx"] = False
+                self._recorder = AudioToTextRecorder(**retry_config)
+            else:
+                raise
 
     def _preprocess_text(self, text: str) -> str:
         text = text.lstrip()

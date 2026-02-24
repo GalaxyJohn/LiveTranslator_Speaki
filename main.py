@@ -15,6 +15,16 @@ def _prepare_runtime() -> None:
     sys.dont_write_bytecode = True
     os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
+    # Keep torch hub cache in user-local storage, not beside the EXE.
+    # This avoids missing/corrupted model paths in packaged runs.
+    local_appdata = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    torch_home = local_appdata / "Speaki" / "torch"
+    try:
+        torch_home.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("TORCH_HOME", str(torch_home))
+    except Exception:
+        pass
+
     # Remove stale temporary pyc files like *.pyc.123456 left by failed rename.
     root = Path(__file__).resolve().parent
     for pycache_dir in root.rglob("__pycache__"):
