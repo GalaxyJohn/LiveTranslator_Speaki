@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -9,7 +9,7 @@ from typing import Any, Dict
 @dataclass
 class DeepLSettings:
     api_key: str = ""
-    delay: float = 0.0
+    delay: float = 0.3
     formality: str = "default"  # default, more, less
     context: str = ""
     preserve_formatting: str = "disabled"  # disabled, enabled
@@ -17,14 +17,14 @@ class DeepLSettings:
 
 @dataclass
 class GoogleSettings:
-    delay: float = 0.0
+    delay: float = 0.3
 
 
 @dataclass
 class PapagoSettings:
     client_id: str = ""
     client_secret: str = ""
-    delay: float = 0.0
+    delay: float = 0.3
 
 
 @dataclass
@@ -59,7 +59,7 @@ class LLMTranslatorSettings:
 @dataclass
 class DeepLFreeSettings:
     api_key: str = ""
-    delay: float = 0.0
+    delay: float = 0.3
     formality: str = "default"  # default, more, less
     context: str = ""
     preserve_formatting: str = "disabled"  # disabled, enabled
@@ -69,6 +69,12 @@ class DeepLFreeSettings:
 class STTSettings:
     # "cuda" or "cpu"
     backend: str = "cuda"
+
+    # tiny, base, small, medium, large
+    model_size: str = "large"
+
+    # auto or en (en only makes sense when source_lang is English)
+    model_variant: str = "auto"
 
     # Input/output device indices from PyAudio device list.
     # -1 means "use system default".

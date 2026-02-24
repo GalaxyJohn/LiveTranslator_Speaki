@@ -15,6 +15,18 @@ SentenceCallback = Callable[[str], None]
 logger = logging.getLogger(__name__)
 
 
+class _NullStream:
+    """Write sink used when stdout/stderr are absent in windowed EXE runs."""
+
+    def write(self, _data: str) -> int:
+        return 0
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
 @dataclass
 class STTConfig:
     """Wrapper settings for RealtimeSTT."""
@@ -43,7 +55,7 @@ class STTConfig:
     beam_size_realtime: int = 3
 
     silero_use_onnx: bool = False
-    faster_whisper_vad_filter: bool = False
+    faster_whisper_vad_filter: bool = True
 
     spinner: bool = False
     no_log_file: bool = True
@@ -188,6 +200,13 @@ class STTEngine:
         if self.config.silero_use_onnx:
             logger.info("silero_use_onnx was requested but is forced OFF for runtime stability.")
 
+        if not self.config.faster_whisper_vad_filter:
+            logger.info("faster_whisper_vad_filter was requested OFF but is forced ON for runtime stability.")
+
+        # Keep STT initialization stable in packaged runs and avoid extra GPU load spikes.
+        # We rely on WebRTC + faster_whisper VAD instead of Silero deactivity detection.
+        silero_deactivity_detection = False
+
         recorder_config = {
             "spinner": self.config.spinner,
             "model": self.config.model,
@@ -205,7 +224,7 @@ class STTEngine:
             "enable_realtime_transcription": self.config.enable_realtime_transcription,
             "realtime_processing_pause": self.config.realtime_processing_pause,
             "on_realtime_transcription_update": self._on_realtime_transcription_update,
-            "silero_deactivity_detection": True,
+            "silero_deactivity_detection": silero_deactivity_detection,
             "early_transcription_on_silence": 0,
             "beam_size": self.config.beam_size,
             "beam_size_realtime": self.config.beam_size_realtime,
@@ -214,7 +233,7 @@ class STTEngine:
             "allowed_latency_limit": self.config.allowed_latency_limit,
             "initial_prompt_realtime": self.config.initial_prompt_realtime,
             "silero_use_onnx": False,
-            "faster_whisper_vad_filter": self.config.faster_whisper_vad_filter,
+            "faster_whisper_vad_filter": True,
             "wake_words": "",
             "wakeword_backend": "none",
             "openwakeword_inference_framework": "tflite",
@@ -224,20 +243,44 @@ class STTEngine:
             recorder_config["input_device_index"] = int(input_device_index)
 
         torch_hub_original = None
-        try:
-            import torch
+        if recorder_config["silero_deactivity_detection"]:
+            try:
+                import torch
 
-            torch_hub_original = torch.hub.load
+                torch_hub_original = torch.hub.load
 
-            def _safe_hub_load(repo_or_dir, model_name, *args, **kwargs):
-                repo_text = str(repo_or_dir).lower()
-                if model_name == "silero_vad" and "silero-vad" in repo_text:
-                    kwargs["onnx"] = False
-                return torch_hub_original(repo_or_dir, model_name, *args, **kwargs)
+                def _safe_hub_load(*args, **kwargs):
+                    repo_or_dir = kwargs.get("repo_or_dir")
+                    if repo_or_dir is None and args:
+                        repo_or_dir = args[0]
 
-            torch.hub.load = _safe_hub_load
-        except Exception:
-            torch_hub_original = None
+                    model_name = kwargs.get("model") or kwargs.get("model_name")
+                    if model_name is None and len(args) >= 2:
+                        model_name = args[1]
+
+                    repo_text = str(repo_or_dir or "").lower()
+                    if str(model_name) == "silero_vad" and "silero-vad" in repo_text:
+                        kwargs["onnx"] = False
+
+                    kwargs.setdefault("verbose", False)
+                    kwargs.setdefault("trust_repo", True)
+
+                    if sys.stdout is None:
+                        sys.stdout = _NullStream()
+                    if sys.stderr is None:
+                        sys.stderr = _NullStream()
+
+                    try:
+                        return torch_hub_original(*args, **kwargs)
+                    except TypeError as exc:
+                        if "trust_repo" in kwargs and "trust_repo" in str(exc):
+                            kwargs.pop("trust_repo", None)
+                            return torch_hub_original(*args, **kwargs)
+                        raise
+
+                torch.hub.load = _safe_hub_load
+            except Exception:
+                torch_hub_original = None
 
         try:
             self._recorder = AudioToTextRecorder(**recorder_config)
@@ -248,14 +291,17 @@ class STTEngine:
                 or "NO_SUCHFILE" in msg
                 or "onnx" in msg.lower()
             )
-            if is_onnx_issue:
+            should_retry_without_silero = bool(recorder_config.get("silero_deactivity_detection"))
+            if should_retry_without_silero or is_onnx_issue:
                 logger.warning(
-                    "STT init hit ONNX-related error. Retrying with stricter safe config: %s",
+                    "STT init failed (silero=%s). Retrying with safer VAD config: %s",
+                    recorder_config.get("silero_deactivity_detection"),
                     msg,
                 )
                 retry_config = dict(recorder_config)
                 retry_config["silero_use_onnx"] = False
                 retry_config["silero_deactivity_detection"] = False
+                retry_config["faster_whisper_vad_filter"] = True
                 retry_config["wake_words"] = ""
                 retry_config["wakeword_backend"] = "none"
                 retry_config["openwakeword_inference_framework"] = "tflite"
@@ -424,7 +470,29 @@ class STTEngine:
                 if self._paused:
                     time.sleep(0.05)
                     continue
-                self._recorder.text(self._handle_final_text)
+
+                try:
+                    self._recorder.text(self._handle_final_text)
+                except Exception as exc:
+                    msg = str(exc)
+                    if "No clip timestamps found" in msg:
+                        logger.warning(
+                            "RealtimeSTT returned no clip timestamps; recovering and continuing: %s",
+                            msg,
+                        )
+                        self._recover_audio_backlog("no clip timestamps")
+                        time.sleep(0.05)
+                        continue
+                    raise
+
+                # Adaptive backpressure to avoid runaway CPU/GPU usage.
+                queue_size = self._get_audio_queue_size()
+                if queue_size >= self.config.queue_recovery_threshold:
+                    time.sleep(0.03)
+                elif queue_size >= self.config.allowed_latency_limit:
+                    time.sleep(0.015)
+                else:
+                    time.sleep(0.008)
         finally:
             self._running = False
             self._stop_queue_watchdog()
@@ -449,9 +517,29 @@ class STTEngine:
 
     def set_paused(self, paused: bool) -> None:
         self._paused = paused
+        if self._recorder is None:
+            return
+
+        try:
+            if hasattr(self._recorder, "set_microphone"):
+                self._recorder.set_microphone(not paused)
+        except Exception:
+            pass
+
+        if paused:
+            try:
+                if getattr(self._recorder, "is_recording", False) and hasattr(self._recorder, "stop"):
+                    self._recorder.stop()
+            except Exception:
+                pass
+
+            self.clear_audio_backlog()
+            if self.on_partial is not None:
+                self.on_partial("")
 
     @property
     def sentences(self) -> List[str]:
         return list(self._full_sentences)
+
 
 

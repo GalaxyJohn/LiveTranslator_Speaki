@@ -7,7 +7,7 @@ import os
 import time
 from typing import Dict, List, Tuple
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -35,6 +35,7 @@ class STTWorker(QObject):
     partial_result = Signal(str)
     final_result = Signal(int, str)
     error = Signal(str)
+    ready = Signal()
     finished = Signal()
 
     def __init__(self, config: STTConfig) -> None:
@@ -58,6 +59,7 @@ class STTWorker(QObject):
                 on_partial=self._on_partial,
                 on_final=self._on_final,
             )
+            self.ready.emit()
             self._engine.run()
         except Exception as exc:
             logger.exception("STT worker crashed")
@@ -213,6 +215,13 @@ class TranslatorWorker(QObject):
                 return
             except Exception as exc:
                 last_error = str(exc)
+                # 4xx request-shape errors are deterministic; don't burn retry budget.
+                if (
+                    "Error code: 400" in last_error
+                    or "invalid_request_error" in last_error
+                    or "Unsupported parameter" in last_error
+                ):
+                    break
 
         if last_error and not self._stopped:
             self.error.emit(last_error)
@@ -256,8 +265,14 @@ class MainWindow(QMainWindow):
         self._ignore_translation_below_id = 0
         self._stopping = False
         self._preparing = False
+        self._status_state = "idle"
+
+        self._recording_status_timer = QTimer(self)
+        self._recording_status_timer.setSingleShot(True)
+        self._recording_status_timer.timeout.connect(self._on_recording_timeout)
 
         self._build_ui()
+        self._set_status("idle")
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -343,6 +358,25 @@ class MainWindow(QMainWindow):
 
         controls2.addStretch(1)
 
+    def _set_status(self, state: str, detail: str = "", tooltip: str = "") -> None:
+        self._status_state = state
+        text = f"Status: {state}" if not detail else f"Status: {state} - {detail}"
+        self.status_label.setText(text)
+        self.status_label.setToolTip(tooltip)
+
+    def _mark_recording_activity(self) -> None:
+        if self._paused or self._preparing:
+            return
+        self._set_status("recording")
+        self._recording_status_timer.start(1200)
+
+    @Slot()
+    def _on_recording_timeout(self) -> None:
+        if self._paused or self._preparing:
+            return
+        if self._status_state == "recording":
+            self._set_status("running")
+
     def _update_display(self) -> None:
         show_original = self.show_original_checkbox.isChecked()
         show_translation = self.show_translation_checkbox.isChecked()
@@ -379,17 +413,22 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _handle_partial(self, text: str) -> None:
-        if self._preparing:
-            self._preparing = False
-            self.status_label.setText("Status: running")
         self._current_partial = text
         self._update_display()
+
+        if self._paused:
+            return
+
+        if text.strip():
+            self._mark_recording_activity()
+        elif not self._preparing and self._status_state == "recording":
+            self._set_status("running")
 
     @Slot(int, str)
     def _handle_final(self, sentence_id: int, text: str) -> None:
         if self._preparing:
             self._preparing = False
-            self.status_label.setText("Status: running")
+            self._set_status("running")
 
         now = time.monotonic()
         if self._start_time is None:
@@ -413,6 +452,7 @@ class MainWindow(QMainWindow):
         self._prune_visible_sentences()
         self._prune_segment_logs()
         self._update_display()
+        self._mark_recording_activity()
 
         if self._translator_worker is not None:
             self.translate_requested.emit(sentence_id, text)
@@ -480,16 +520,12 @@ class MainWindow(QMainWindow):
         short = (message or "").strip().splitlines()[0] if message else "unknown error"
         if len(short) > 140:
             short = short[:137] + "..."
-        self.status_label.setText(f"Status: error - {short}")
-        self.status_label.setToolTip(message or "")
+        self._set_status("error", short, message or "")
 
     @Slot(str)
     def _handle_notice(self, message: str) -> None:
         logger.info("UI notice: %s", message)
-        short = (message or "").strip().splitlines()[0] if message else "notice"
-        if len(short) > 140:
-            short = short[:137] + "..."
-        self.status_label.setText(f"Status: notice - {short}")
+        # Keep preparing/running/recording status stable; show notice as tooltip only.
         self.status_label.setToolTip(message or "")
 
     def _open_settings(self) -> None:
@@ -519,28 +555,72 @@ class MainWindow(QMainWindow):
 
         input_device_index = normalize_device_index(self._settings.stt.input_device_index)
         output_device_index = normalize_device_index(self._settings.stt.output_device_index)
-        language = self._settings.source_lang if self._settings.source_lang != "auto" else "ru"
+
+        source_lang = (self._settings.source_lang or "auto").strip().lower()
+        language = None if source_lang == "auto" else source_lang
+
+        model_size = (getattr(self._settings.stt, "model_size", "large") or "large").strip().lower()
+        if model_size not in {"tiny", "base", "small", "medium", "large"}:
+            model_size = "large"
+
+        model_variant = (getattr(self._settings.stt, "model_variant", "auto") or "auto").strip().lower()
+        use_en_variant = source_lang == "en" and model_variant == "en"
+
+        if model_size == "large":
+            model = "large-v3"
+            realtime_model = "small"
+        elif model_size == "medium":
+            model = "medium"
+            realtime_model = "small"
+        else:
+            model = model_size
+            realtime_model = model_size
+
+        if use_en_variant:
+            if model_size == "large":
+                logger.info("STT size=large has no .en checkpoint. Using medium.en for English mode.")
+                model = "medium.en"
+                realtime_model = "small.en"
+            else:
+                model = f"{model}.en"
+                realtime_model = f"{realtime_model}.en"
+
+        common_kwargs = {
+            "model": model,
+            "realtime_model_type": realtime_model,
+            "language": language,
+            "input_device_index": input_device_index,
+            "output_device_index": output_device_index,
+            "faster_whisper_vad_filter": True,
+            "min_gap_between_recordings": 0.10,
+            "allowed_latency_limit": 90,
+            "queue_recovery_threshold": 105,
+        }
 
         if backend == "cpu":
             return STTConfig(
                 device="cpu",
                 compute_type="int8",
-                model="small",
-                realtime_model_type="tiny",
-                language=language,
-                input_device_index=input_device_index,
-                output_device_index=output_device_index,
+                beam_size=1,
+                beam_size_realtime=1,
+                realtime_processing_pause=0.08,
+                **common_kwargs,
             )
 
         return STTConfig(
             device="cuda",
             compute_type="float16",
-            model="large-v3",
-            realtime_model_type="medium",
-            language=language,
-            input_device_index=input_device_index,
-            output_device_index=output_device_index,
+            beam_size=2,
+            beam_size_realtime=1,
+            realtime_processing_pause=0.06,
+            **common_kwargs,
         )
+
+    @Slot()
+    def _handle_stt_ready(self) -> None:
+        self._preparing = False
+        if not self._paused and self._status_state != "error":
+            self._set_status("running")
 
     def _on_start_clicked(self) -> None:
         if self._stt_thread is not None:
@@ -560,11 +640,13 @@ class MainWindow(QMainWindow):
         self._stt_worker.moveToThread(self._stt_thread)
 
         self._stt_thread.started.connect(self._stt_worker.run)
+        self._stt_worker.ready.connect(self._handle_stt_ready)
         self._stt_worker.partial_result.connect(self._handle_partial)
         self._stt_worker.final_result.connect(self._handle_final)
         self._stt_worker.error.connect(self._handle_error)
         self._stt_worker.finished.connect(self._stt_thread.quit)
         self._stt_worker.finished.connect(self._on_stt_finished)
+
         self._translator_thread = QThread(self)
         self._translator_worker = TranslatorWorker(self._settings)
         self._translator_worker.moveToThread(self._translator_thread)
@@ -579,7 +661,8 @@ class MainWindow(QMainWindow):
         self._translator_thread.started.connect(self._translator_worker.initialize)
 
         self._preparing = True
-        self.status_label.setText("Status: preparing")
+        self._recording_status_timer.stop()
+        self._set_status("preparing")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.pause_button.setEnabled(True)
@@ -599,10 +682,11 @@ class MainWindow(QMainWindow):
         self._stt_worker.set_paused(self._paused)
 
         if self._paused:
-            self.status_label.setText("Status: paused")
+            self._recording_status_timer.stop()
+            self._set_status("paused")
             self.pause_button.setText("Resume")
         else:
-            self.status_label.setText("Status: running")
+            self._set_status("running")
             self.pause_button.setText("Pause")
 
     def _on_clear_clicked(self) -> None:
@@ -620,6 +704,8 @@ class MainWindow(QMainWindow):
         self._segment_translation_log.clear()
         self._segment_start_time = time.monotonic()
         self._update_display()
+        if not self._paused and not self._preparing and self._status_state != "error":
+            self._set_status("running")
 
     @Slot()
     def _on_stt_finished(self) -> None:
@@ -640,8 +726,8 @@ class MainWindow(QMainWindow):
             self._translator_thread = None
             self._translator_worker = None
 
-        if not self.status_label.text().startswith("Status: error"):
-            self.status_label.setText("Status: idle")
+        if self._status_state != "error":
+            self._set_status("idle")
 
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -657,7 +743,7 @@ class MainWindow(QMainWindow):
             return
 
         # Last-resort path to avoid "QThread: Destroyed while thread is still running".
-        self.status_label.setText(f"Status: warning - forcing {name} stop")
+        self._set_status("error", f"warning - forcing {name} stop")
         thread.terminate()
         thread.wait(2000)
 
@@ -688,7 +774,7 @@ class MainWindow(QMainWindow):
                 self._translator_thread = None
                 self._translator_worker = None
 
-            self.status_label.setText("Status: idle")
+            self._set_status("idle")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.pause_button.setEnabled(False)
@@ -763,10 +849,4 @@ class MainWindow(QMainWindow):
         self._on_stop_clicked()
         self._settings.save(SETTINGS_PATH)
         super().closeEvent(event)
-
-
-
-
-
-
 

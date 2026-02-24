@@ -2,15 +2,18 @@
 
 from PyInstaller.utils.hooks import collect_data_files
 
+
 a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
     datas=[
         ("settings.sample.json", "."),
+        ("speaki.ico", "."),
         *collect_data_files("pvporcupine"),
         *collect_data_files("RealtimeSTT"),
         *collect_data_files("openwakeword"),
+        *collect_data_files("faster_whisper"),
     ],
     hiddenimports=[
         "openai",
@@ -40,6 +43,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
+    icon="speaki.ico",
 )
 
 coll = COLLECT(

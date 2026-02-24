@@ -136,21 +136,37 @@ class OpenAILLMTranslator(BaseTranslator):
         )
 
         model_name = self._resolve_model_name()
+        model_name_lc = model_name.lower()
 
         request_kwargs: dict[str, object] = {
             "model": model_name,
-            "temperature": self.settings.temperature,
-            "top_p": self.settings.top_p,
             "max_output_tokens": self.settings.max_tokens,
             "input": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         }
+
+        # GPT-5.1/5.2 accept temperature/top_p only when reasoning effort is none.
+        if model_name_lc.startswith("gpt-5.1") or model_name_lc.startswith("gpt-5.2"):
+            request_kwargs["reasoning"] = {"effort": "none"}
+
+        request_kwargs["temperature"] = self.settings.temperature
+        request_kwargs["top_p"] = self.settings.top_p
+
         if self._request_timeout is not None:
             request_kwargs["timeout"] = self._request_timeout
 
-        resp = self._client.responses.create(**request_kwargs)
+        try:
+            resp = self._client.responses.create(**request_kwargs)
+        except Exception as exc:
+            msg = str(exc)
+            if "Unsupported parameter" in msg and "temperature" in msg:
+                raise TranslatorError(
+                    f"Model '{model_name}' cannot use temperature with current settings. "
+                    "Use gpt-5.1/gpt-5.2 (reasoning none) or a model like gpt-4.1/gpt-4o."
+                ) from exc
+            raise
 
         translated = (resp.output_text or "").strip()
         if not translated:

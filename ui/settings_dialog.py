@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import re
 
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import (
@@ -31,7 +33,7 @@ from core.config import (
 def _add_lang_items(combo: QComboBox) -> None:
     combo.clear()
     combo.addItem("Auto (auto)", "auto")
-    combo.addItem("Japanese (ja)", "ja")
+    combo.addItem("Japanese (jp)", "ja")
     combo.addItem("Korean (ko)", "ko")
     combo.addItem("English (en)", "en")
     combo.addItem("Russian (ru)", "ru")
@@ -48,6 +50,12 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
 
     def _clean(name: str) -> str:
         return " ".join(name.strip().split())
+
+    def _canonical_name(name: str) -> str:
+        text = _clean(name).lower()
+        text = re.sub(r"(loopback|what u hear|stereo mix|monitor of)", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
+        return " ".join(text.split())
 
     pa = pyaudio.PyAudio()
     try:
@@ -81,9 +89,7 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
             except Exception:
                 pass
 
-        seen_inputs: set[str] = set()
-        seen_outputs: set[str] = set()
-
+        devices: list[dict[str, object]] = []
         for idx in range(pa.get_device_count()):
             info = pa.get_device_info_by_index(idx)
             host_api = int(info.get("hostApi", -1))
@@ -94,24 +100,91 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
             name_key = name.lower()
             max_in = int(info.get("maxInputChannels", 0))
             max_out = int(info.get("maxOutputChannels", 0))
-            is_loopback = "loopback" in name_key
+            is_loopback = bool(info.get("isLoopbackDevice", False)) or "loopback" in name_key
+            devices.append(
+                {
+                    "idx": int(idx),
+                    "name": name,
+                    "name_key": name_key,
+                    "canonical": _canonical_name(name),
+                    "max_in": max_in,
+                    "max_out": max_out,
+                    "is_loopback": is_loopback,
+                }
+            )
 
-            # Keep strict split so input/output combos do not get mixed.
-            if max_in > 0 and max_out == 0 and not is_loopback:
-                if name_key not in seen_inputs:
-                    label = name
-                    if default_input_idx is not None and int(idx) == default_input_idx:
-                        label = f"{name} (Default)"
-                    inputs.append((label, int(idx)))
-                    seen_inputs.add(name_key)
+        output_canonical_names = {
+            str(d["canonical"])
+            for d in devices
+            if int(d["max_out"]) > 0 and str(d["canonical"])
+        }
 
-            if max_out > 0 and max_in == 0:
-                if name_key not in seen_outputs:
-                    label = name
-                    if default_output_idx is not None and int(idx) == default_output_idx:
-                        label = f"{name} (Default)"
-                    outputs.append((label, int(idx)))
-                    seen_outputs.add(name_key)
+        def _looks_like_output_mirror(device: dict[str, object]) -> bool:
+            if bool(device["is_loopback"]):
+                return True
+            if int(device["max_in"]) <= 0 or int(device["max_out"]) != 0:
+                return False
+
+            name_key = str(device["name_key"])
+            if any(tag in name_key for tag in ("stereo mix", "what u hear", "monitor of")):
+                return True
+
+            canonical = str(device["canonical"])
+            if not canonical:
+                return False
+            if canonical in output_canonical_names:
+                return True
+
+            for out_name in output_canonical_names:
+                if len(canonical) >= 10 and (canonical in out_name or out_name in canonical):
+                    return True
+            return False
+
+        strict_inputs = [
+            d
+            for d in devices
+            if int(d["max_in"]) > 0 and int(d["max_out"]) == 0 and not _looks_like_output_mirror(d)
+        ]
+        strict_outputs = [
+            d
+            for d in devices
+            if int(d["max_out"]) > 0 and int(d["max_in"]) == 0 and not bool(d["is_loopback"])
+        ]
+
+        if not strict_inputs:
+            strict_inputs = [
+                d
+                for d in devices
+                if int(d["max_in"]) > 0 and not _looks_like_output_mirror(d)
+            ]
+        if not strict_outputs:
+            strict_outputs = [
+                d
+                for d in devices
+                if int(d["max_out"]) > 0 and not bool(d["is_loopback"])
+            ]
+
+        seen_inputs: set[str] = set()
+        for d in strict_inputs:
+            name_key = str(d["name_key"])
+            if name_key in seen_inputs:
+                continue
+            label = str(d["name"])
+            if default_input_idx is not None and int(d["idx"]) == default_input_idx:
+                label = f"{label} (Default)"
+            inputs.append((label, int(d["idx"])))
+            seen_inputs.add(name_key)
+
+        seen_outputs: set[str] = set()
+        for d in strict_outputs:
+            name_key = str(d["name_key"])
+            if name_key in seen_outputs:
+                continue
+            label = str(d["name"])
+            if default_output_idx is not None and int(d["idx"]) == default_output_idx:
+                label = f"{label} (Default)"
+            outputs.append((label, int(d["idx"])))
+            seen_outputs.add(name_key)
     except Exception:
         return [], []
     finally:
@@ -657,6 +730,40 @@ class SettingsDialog(QDialog):
 
         main_layout = QVBoxLayout(self)
 
+        stt_group = QGroupBox("STT")
+        main_layout.addWidget(stt_group)
+        s_layout = QGridLayout(stt_group)
+
+        s_layout.addWidget(QLabel("Backend"), 0, 0)
+        self.stt_backend_combo = QComboBox()
+        self.stt_backend_combo.addItem("CUDA (faster, GPU)", "cuda")
+        self.stt_backend_combo.addItem("CPU (compatible)", "cpu")
+        s_layout.addWidget(self.stt_backend_combo, 0, 1)
+
+        s_layout.addWidget(QLabel("Model size"), 0, 2)
+        self.stt_model_size_combo = QComboBox()
+        self.stt_model_size_combo.addItem("tiny", "tiny")
+        self.stt_model_size_combo.addItem("base", "base")
+        self.stt_model_size_combo.addItem("small", "small")
+        self.stt_model_size_combo.addItem("medium", "medium")
+        self.stt_model_size_combo.addItem("large", "large")
+        s_layout.addWidget(self.stt_model_size_combo, 0, 3)
+
+        s_layout.addWidget(QLabel("English model"), 1, 0)
+        self.stt_model_variant_combo = QComboBox()
+        s_layout.addWidget(self.stt_model_variant_combo, 1, 1)
+
+        s_layout.addWidget(QLabel("Output device"), 1, 2)
+        self.input_device_combo = QComboBox()
+        s_layout.addWidget(self.input_device_combo, 1, 3)
+
+        s_layout.addWidget(QLabel("Input device"), 2, 0)
+        self.output_device_combo = QComboBox()
+        s_layout.addWidget(self.output_device_combo, 2, 1)
+
+        self._audio_inputs, self._audio_outputs = _list_audio_devices()
+        self._populate_audio_device_combos()
+
         trans_group = QGroupBox("Translator")
         main_layout.addWidget(trans_group)
         t_layout = QGridLayout(trans_group)
@@ -680,23 +787,6 @@ class SettingsDialog(QDialog):
         _add_lang_items(self.target_lang_combo)
         t_layout.addWidget(self.target_lang_combo, 1, 3)
 
-        t_layout.addWidget(QLabel("STT backend"), 2, 0)
-        self.stt_backend_combo = QComboBox()
-        self.stt_backend_combo.addItem("CUDA (faster, GPU)", "cuda")
-        self.stt_backend_combo.addItem("CPU (compatible)", "cpu")
-        t_layout.addWidget(self.stt_backend_combo, 2, 1)
-
-        t_layout.addWidget(QLabel("Input device (Windows)"), 3, 0)
-        self.input_device_combo = QComboBox()
-        t_layout.addWidget(self.input_device_combo, 3, 1)
-
-        t_layout.addWidget(QLabel("Output device (Windows)"), 3, 2)
-        self.output_device_combo = QComboBox()
-        t_layout.addWidget(self.output_device_combo, 3, 3)
-
-        self._audio_inputs, self._audio_outputs = _list_audio_devices()
-        self._populate_audio_device_combos()
-
         self.stack = AdaptiveStackedWidget()
         main_layout.addWidget(self.stack)
 
@@ -713,6 +803,7 @@ class SettingsDialog(QDialog):
         self.stack.addWidget(self.llm_page)         # index 4
 
         self.translator_combo.currentIndexChanged.connect(self._on_translator_changed)
+        self.source_lang_combo.currentIndexChanged.connect(self._on_source_lang_changed)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -725,14 +816,14 @@ class SettingsDialog(QDialog):
         self.input_device_combo.clear()
         self.output_device_combo.clear()
 
-        self.input_device_combo.addItem("Windows default input", -1)
-        self.output_device_combo.addItem("Windows default output", -1)
+        self.input_device_combo.addItem("Windows default", -1)
+        self.output_device_combo.addItem("Windows default", -1)
 
         for label, idx in self._audio_inputs:
-            self.input_device_combo.addItem(f"Input: {label}", idx)
+            self.input_device_combo.addItem(f"{label}", idx)
 
         for label, idx in self._audio_outputs:
-            self.output_device_combo.addItem(f"Output: {label}", idx)
+            self.output_device_combo.addItem(f"{label}", idx)
 
     def _combo_data_to_int(self, combo: QComboBox, default: int = -1) -> int:
         value = combo.currentData()
@@ -740,6 +831,27 @@ class SettingsDialog(QDialog):
             return int(value)
         except Exception:
             return default
+
+    def _combo_data_to_str(self, combo: QComboBox, default: str = "") -> str:
+        value = combo.currentData()
+        if value is None:
+            return default
+        text = str(value).strip()
+        return text if text else default
+
+    def _refresh_stt_variant_options(self) -> None:
+        current = self._combo_data_to_str(self.stt_model_variant_combo, "auto").lower()
+        source_lang = self._combo_data_to_str(self.source_lang_combo, "auto").lower()
+
+        self.stt_model_variant_combo.blockSignals(True)
+        self.stt_model_variant_combo.clear()
+        self.stt_model_variant_combo.addItem("Auto (multilingual)", "auto")
+        if source_lang == "en":
+            self.stt_model_variant_combo.addItem("English model (.en)", "en")
+
+        idx = self.stt_model_variant_combo.findData(current)
+        self.stt_model_variant_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.stt_model_variant_combo.blockSignals(False)
 
     def _load_from_settings(self) -> None:
         s = self._settings
@@ -760,6 +872,15 @@ class SettingsDialog(QDialog):
         idx = self.stt_backend_combo.findData(stt_backend)
         if idx >= 0:
             self.stt_backend_combo.setCurrentIndex(idx)
+
+        stt_model_size = (getattr(s.stt, "model_size", "large") or "large").strip().lower()
+        idx = self.stt_model_size_combo.findData(stt_model_size)
+        self.stt_model_size_combo.setCurrentIndex(idx if idx >= 0 else self.stt_model_size_combo.findData("large"))
+
+        self._refresh_stt_variant_options()
+        stt_model_variant = (getattr(s.stt, "model_variant", "auto") or "auto").strip().lower()
+        idx = self.stt_model_variant_combo.findData(stt_model_variant)
+        self.stt_model_variant_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
         try:
             input_device_index = int(s.stt.input_device_index)
@@ -802,13 +923,22 @@ class SettingsDialog(QDialog):
     def _on_translator_changed(self, _index: int) -> None:
         self._sync_stack_page()
 
+    def _on_source_lang_changed(self, _index: int) -> None:
+        self._refresh_stt_variant_options()
+
     def apply_to_settings(self) -> None:
         s = self._settings
 
         s.translator_type = self.translator_combo.currentData()
         s.source_lang = self.source_lang_combo.currentData()
         s.target_lang = self.target_lang_combo.currentData()
-        s.stt.backend = self.stt_backend_combo.currentData()
+
+        s.stt.backend = self._combo_data_to_str(self.stt_backend_combo, "cuda")
+        s.stt.model_size = self._combo_data_to_str(self.stt_model_size_combo, "large")
+        model_variant = self._combo_data_to_str(self.stt_model_variant_combo, "auto")
+        if s.source_lang != "en":
+            model_variant = "auto"
+        s.stt.model_variant = model_variant
         s.stt.input_device_index = self._combo_data_to_int(self.input_device_combo, -1)
         s.stt.output_device_index = self._combo_data_to_int(self.output_device_combo, -1)
 
@@ -817,8 +947,3 @@ class SettingsDialog(QDialog):
         self.google_page.apply(s.google)
         self.papago_page.apply(s.papago)
         self.llm_page.apply(s.llm)
-
-
-
-
-

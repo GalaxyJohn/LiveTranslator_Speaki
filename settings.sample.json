@@ -1,17 +1,17 @@
-{
+﻿{
   "translator_type": "LLM_API_Translator",
   "source_lang": "ja",
   "target_lang": "ko",
   "deepl": {
     "api_key": "",
-    "delay": 0.0,
+    "delay": 0.3,
     "formality": "default",
     "context": "",
     "preserve_formatting": "disabled"
   },
   "deepl_free": {
     "api_key": "",
-    "delay": 0.0,
+    "delay": 0.3,
     "formality": "default",
     "context": "",
     "preserve_formatting": "disabled"
@@ -22,7 +22,7 @@
   "papago": {
     "client_id": "",
     "client_secret": "",
-    "delay": 0.0
+    "delay": 0.3
   },
   "llm": {
     "provider": "OpenAI",
@@ -86,8 +86,9 @@
   },
   "stt": {
     "backend": "cuda",
+    "model_size": "large",
+    "model_variant": "auto",
     "input_device_index": -1,
     "output_device_index": -1
   }
 }
-
