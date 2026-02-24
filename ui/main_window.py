@@ -1,7 +1,8 @@
-# SPEAKI/ui/main_window.py
+﻿# SPEAKI/ui/main_window.py
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import os
 import time
 from typing import Dict, List, Tuple
@@ -27,6 +28,7 @@ from .settings_dialog import SettingsDialog
 
 
 SETTINGS_PATH = "settings.json"
+logger = logging.getLogger(__name__)
 
 
 class STTWorker(QObject):
@@ -58,7 +60,8 @@ class STTWorker(QObject):
             )
             self._engine.run()
         except Exception as exc:
-            self.error.emit(str(exc))
+            logger.exception("STT worker crashed")
+            self.error.emit(f"{type(exc).__name__}: {exc}")
         finally:
             self.finished.emit()
 
@@ -473,6 +476,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _handle_error(self, message: str) -> None:
         self._preparing = False
+        logger.error("UI error: %s", message)
         short = (message or "").strip().splitlines()[0] if message else "unknown error"
         if len(short) > 140:
             short = short[:137] + "..."
@@ -481,6 +485,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _handle_notice(self, message: str) -> None:
+        logger.info("UI notice: %s", message)
         short = (message or "").strip().splitlines()[0] if message else "notice"
         if len(short) > 140:
             short = short[:137] + "..."
@@ -758,5 +763,10 @@ class MainWindow(QMainWindow):
         self._on_stop_clicked()
         self._settings.save(SETTINGS_PATH)
         super().closeEvent(event)
+
+
+
+
+
 
 

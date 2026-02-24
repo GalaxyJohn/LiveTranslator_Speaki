@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import (
@@ -67,6 +67,20 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
             except Exception:
                 preferred_host_api = None
 
+        default_input_idx: int | None = None
+        default_output_idx: int | None = None
+        if preferred_host_api is not None:
+            try:
+                host_info = pa.get_host_api_info_by_index(preferred_host_api)
+                di = int(host_info.get("defaultInputDevice", -1))
+                do = int(host_info.get("defaultOutputDevice", -1))
+                if di >= 0:
+                    default_input_idx = di
+                if do >= 0:
+                    default_output_idx = do
+            except Exception:
+                pass
+
         seen_inputs: set[str] = set()
         seen_outputs: set[str] = set()
 
@@ -78,16 +92,25 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
 
             name = _clean(str(info.get("name", "") or "Unknown device"))
             name_key = name.lower()
+            max_in = int(info.get("maxInputChannels", 0))
+            max_out = int(info.get("maxOutputChannels", 0))
             is_loopback = "loopback" in name_key
 
-            if int(info.get("maxInputChannels", 0)) > 0 and not is_loopback:
+            # Keep strict split so input/output combos do not get mixed.
+            if max_in > 0 and max_out == 0 and not is_loopback:
                 if name_key not in seen_inputs:
-                    inputs.append((name, int(idx)))
+                    label = name
+                    if default_input_idx is not None and int(idx) == default_input_idx:
+                        label = f"{name} (Default)"
+                    inputs.append((label, int(idx)))
                     seen_inputs.add(name_key)
 
-            if int(info.get("maxOutputChannels", 0)) > 0:
+            if max_out > 0 and max_in == 0:
                 if name_key not in seen_outputs:
-                    outputs.append((name, int(idx)))
+                    label = name
+                    if default_output_idx is not None and int(idx) == default_output_idx:
+                        label = f"{name} (Default)"
+                    outputs.append((label, int(idx)))
                     seen_outputs.add(name_key)
     except Exception:
         return [], []
@@ -97,8 +120,8 @@ def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]
         except Exception:
             pass
 
-    inputs.sort(key=lambda x: x[0].lower())
-    outputs.sort(key=lambda x: x[0].lower())
+    inputs.sort(key=lambda x: (0 if "(Default)" in x[0] else 1, x[0].lower()))
+    outputs.sort(key=lambda x: (0 if "(Default)" in x[0] else 1, x[0].lower()))
     return inputs, outputs
 
 
@@ -794,6 +817,7 @@ class SettingsDialog(QDialog):
         self.google_page.apply(s.google)
         self.papago_page.apply(s.papago)
         self.llm_page.apply(s.llm)
+
 
 
 

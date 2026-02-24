@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -166,6 +166,11 @@ class STTEngine:
             except Exception:
                 pass
 
+        try:
+            logging.getLogger("realtimestt").propagate = True
+        except Exception:
+            pass
+
         input_device_index = self.config.input_device_index
 
         # If input is not explicitly selected but output is selected,
@@ -179,6 +184,9 @@ class STTEngine:
                     self.config.output_device_index,
                     mapped,
                 )
+
+        if self.config.silero_use_onnx:
+            logger.info("silero_use_onnx was requested but is forced OFF for runtime stability.")
 
         recorder_config = {
             "spinner": self.config.spinner,
@@ -205,12 +213,31 @@ class STTEngine:
             "handle_buffer_overflow": self.config.handle_buffer_overflow,
             "allowed_latency_limit": self.config.allowed_latency_limit,
             "initial_prompt_realtime": self.config.initial_prompt_realtime,
-            "silero_use_onnx": self.config.silero_use_onnx,
+            "silero_use_onnx": False,
             "faster_whisper_vad_filter": self.config.faster_whisper_vad_filter,
+            "wake_words": "",
+            "wakeword_backend": "none",
+            "openwakeword_inference_framework": "tflite",
         }
 
         if input_device_index is not None:
             recorder_config["input_device_index"] = int(input_device_index)
+
+        torch_hub_original = None
+        try:
+            import torch
+
+            torch_hub_original = torch.hub.load
+
+            def _safe_hub_load(repo_or_dir, model_name, *args, **kwargs):
+                repo_text = str(repo_or_dir).lower()
+                if model_name == "silero_vad" and "silero-vad" in repo_text:
+                    kwargs["onnx"] = False
+                return torch_hub_original(repo_or_dir, model_name, *args, **kwargs)
+
+            torch.hub.load = _safe_hub_load
+        except Exception:
+            torch_hub_original = None
 
         try:
             self._recorder = AudioToTextRecorder(**recorder_config)
@@ -221,16 +248,28 @@ class STTEngine:
                 or "NO_SUCHFILE" in msg
                 or "onnx" in msg.lower()
             )
-            if recorder_config.get("silero_use_onnx") and is_onnx_issue:
+            if is_onnx_issue:
                 logger.warning(
-                    "Silero ONNX init failed, retrying without ONNX backend: %s",
+                    "STT init hit ONNX-related error. Retrying with stricter safe config: %s",
                     msg,
                 )
                 retry_config = dict(recorder_config)
                 retry_config["silero_use_onnx"] = False
+                retry_config["silero_deactivity_detection"] = False
+                retry_config["wake_words"] = ""
+                retry_config["wakeword_backend"] = "none"
+                retry_config["openwakeword_inference_framework"] = "tflite"
                 self._recorder = AudioToTextRecorder(**retry_config)
             else:
                 raise
+        finally:
+            if torch_hub_original is not None:
+                try:
+                    import torch
+
+                    torch.hub.load = torch_hub_original
+                except Exception:
+                    pass
 
     def _preprocess_text(self, text: str) -> str:
         text = text.lstrip()
@@ -414,3 +453,5 @@ class STTEngine:
     @property
     def sentences(self) -> List[str]:
         return list(self._full_sentences)
+
+
