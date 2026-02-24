@@ -25,6 +25,8 @@ class STTConfig:
     language: Optional[str] = "ru"
     device: str = "cuda"
     compute_type: str = "float16"
+    input_device_index: Optional[int] = None
+    output_device_index: Optional[int] = None
     gpu_device_index: int = 0
 
     silero_sensitivity: float = 0.05
@@ -99,6 +101,62 @@ class STTEngine:
 
         self._init_recorder()
 
+    def _find_loopback_input_for_output(self, output_device_index: int) -> Optional[int]:
+        """
+        Try to map selected output device to a loopback-capable input device.
+        Works with names like Stereo Mix / loopback / What U Hear.
+        """
+        try:
+            import pyaudio
+        except Exception:
+            return None
+
+        pa = pyaudio.PyAudio()
+        try:
+            out_info = pa.get_device_info_by_index(int(output_device_index))
+            out_name = str(out_info.get("name", "")).strip().lower()
+
+            tokens = [
+                t for t in out_name.replace("(", " ").replace(")", " ").replace("-", " ").split()
+                if len(t) >= 4
+            ]
+
+            best_index: Optional[int] = None
+            best_score = 0
+
+            for idx in range(pa.get_device_count()):
+                info = pa.get_device_info_by_index(idx)
+                if int(info.get("maxInputChannels", 0)) <= 0:
+                    continue
+
+                name = str(info.get("name", "")).strip().lower()
+                score = 0
+
+                if "stereo mix" in name or "what u hear" in name or "loopback" in name:
+                    score += 4
+
+                if out_name and out_name in name:
+                    score += 3
+
+                if tokens:
+                    score += sum(1 for t in tokens if t in name)
+
+                if score > best_score:
+                    best_score = score
+                    best_index = idx
+
+            # Require minimal confidence.
+            if best_index is not None and best_score >= 4:
+                return int(best_index)
+            return None
+        except Exception:
+            return None
+        finally:
+            try:
+                pa.terminate()
+            except Exception:
+                pass
+
     def _init_recorder(self) -> None:
         if os.name == "nt" and (3, 8) <= sys.version_info < (3, 99):
             try:
@@ -107,6 +165,20 @@ class STTEngine:
                 _init_dll_path()
             except Exception:
                 pass
+
+        input_device_index = self.config.input_device_index
+
+        # If input is not explicitly selected but output is selected,
+        # try to map output to a loopback input (Stereo Mix-like devices).
+        if input_device_index is None and self.config.output_device_index is not None:
+            mapped = self._find_loopback_input_for_output(self.config.output_device_index)
+            if mapped is not None:
+                input_device_index = mapped
+                logger.info(
+                    "Mapped output device index %s to loopback input device index %s",
+                    self.config.output_device_index,
+                    mapped,
+                )
 
         recorder_config = {
             "spinner": self.config.spinner,
@@ -137,6 +209,9 @@ class STTEngine:
             "faster_whisper_vad_filter": self.config.faster_whisper_vad_filter,
         }
 
+        if input_device_index is not None:
+            recorder_config["input_device_index"] = int(input_device_index)
+
         self._recorder = AudioToTextRecorder(**recorder_config)
 
     def _preprocess_text(self, text: str) -> str:
@@ -158,14 +233,14 @@ class STTEngine:
 
         text = self._preprocess_text(text)
 
-        sentence_end_marks = [".", "!", "?", "…"]
+        sentence_end_marks = [".", "!", "?", "..."]
         if text.endswith("..."):
             self._recorder.post_speech_silence_duration = self._mid_sentence_detection_pause
         elif (
             text
-            and text[-1] in sentence_end_marks
+            and any(text.endswith(mark) for mark in sentence_end_marks)
             and self._prev_text
-            and self._prev_text[-1] in sentence_end_marks
+            and any(self._prev_text.endswith(mark) for mark in sentence_end_marks)
         ):
             self._recorder.post_speech_silence_duration = self._end_of_sentence_detection_pause
         else:

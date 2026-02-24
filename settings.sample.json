@@ -85,6 +85,9 @@
     }
   },
   "stt": {
-    "backend": "cuda"
+    "backend": "cuda",
+    "input_device_index": -1,
+    "output_device_index": -1
   }
 }
+

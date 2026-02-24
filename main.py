@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
+import multiprocessing
 import os
 from pathlib import Path
 import sys
@@ -56,6 +57,7 @@ def _configure_logging() -> None:
 def main() -> None:
     _prepare_runtime()
     _configure_logging()
+
     from ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
@@ -76,4 +78,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Required for Windows frozen apps using multiprocessing (PyInstaller).
+    multiprocessing.freeze_support()
     main()

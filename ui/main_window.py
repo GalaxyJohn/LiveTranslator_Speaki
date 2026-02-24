@@ -221,7 +221,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
 
-        self.setWindowTitle("SpeaKI Realtime STT + Translate")
+        self.setWindowTitle("Speaki")
 
         self._settings = AppSettings.load(SETTINGS_PATH)
 
@@ -265,6 +265,8 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(top_bar)
 
         self.status_label = QLabel("Status: idle")
+        self.status_label.setMinimumWidth(220)
+        self.status_label.setMaximumWidth(480)
         top_bar.addWidget(self.status_label)
 
         top_bar.addStretch(1)
@@ -471,11 +473,19 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _handle_error(self, message: str) -> None:
         self._preparing = False
-        self.status_label.setText(f"Status: error - {message}")
+        short = (message or "").strip().splitlines()[0] if message else "unknown error"
+        if len(short) > 140:
+            short = short[:137] + "..."
+        self.status_label.setText(f"Status: error - {short}")
+        self.status_label.setToolTip(message or "")
 
     @Slot(str)
     def _handle_notice(self, message: str) -> None:
-        self.status_label.setText(f"Status: notice - {message}")
+        short = (message or "").strip().splitlines()[0] if message else "notice"
+        if len(short) > 140:
+            short = short[:137] + "..."
+        self.status_label.setText(f"Status: notice - {short}")
+        self.status_label.setToolTip(message or "")
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self._settings, self)
@@ -495,13 +505,26 @@ class MainWindow(QMainWindow):
     def _build_stt_config(self) -> STTConfig:
         backend = (self._settings.stt.backend or "cuda").strip().lower()
 
+        def normalize_device_index(value: object) -> int | None:
+            try:
+                idx = int(value)
+            except Exception:
+                return None
+            return None if idx < 0 else idx
+
+        input_device_index = normalize_device_index(self._settings.stt.input_device_index)
+        output_device_index = normalize_device_index(self._settings.stt.output_device_index)
+        language = self._settings.source_lang if self._settings.source_lang != "auto" else "ru"
+
         if backend == "cpu":
             return STTConfig(
                 device="cpu",
                 compute_type="int8",
                 model="small",
                 realtime_model_type="tiny",
-                language=self._settings.source_lang if self._settings.source_lang != "auto" else "ru",
+                language=language,
+                input_device_index=input_device_index,
+                output_device_index=output_device_index,
             )
 
         return STTConfig(
@@ -509,7 +532,9 @@ class MainWindow(QMainWindow):
             compute_type="float16",
             model="large-v3",
             realtime_model_type="medium",
-            language=self._settings.source_lang if self._settings.source_lang != "auto" else "ru",
+            language=language,
+            input_device_index=input_device_index,
+            output_device_index=output_device_index,
         )
 
     def _on_start_clicked(self) -> None:
@@ -534,7 +559,7 @@ class MainWindow(QMainWindow):
         self._stt_worker.final_result.connect(self._handle_final)
         self._stt_worker.error.connect(self._handle_error)
         self._stt_worker.finished.connect(self._stt_thread.quit)
-        self._stt_worker.finished.connect(lambda: self.status_label.setText("Status: idle"))
+        self._stt_worker.finished.connect(self._on_stt_finished)
         self._translator_thread = QThread(self)
         self._translator_worker = TranslatorWorker(self._settings)
         self._translator_worker.moveToThread(self._translator_thread)
@@ -548,9 +573,6 @@ class MainWindow(QMainWindow):
         )
         self._translator_thread.started.connect(self._translator_worker.initialize)
 
-        self._translator_thread.start()
-        self._stt_thread.start()
-
         self._preparing = True
         self.status_label.setText("Status: preparing")
         self.start_button.setEnabled(False)
@@ -560,6 +582,9 @@ class MainWindow(QMainWindow):
         self.clear_button.setEnabled(True)
         self.save_all_button.setEnabled(True)
         self.save_segment_button.setEnabled(True)
+
+        self._translator_thread.start()
+        self._stt_thread.start()
 
     def _on_pause_clicked(self) -> None:
         if self._stt_worker is None:
@@ -590,6 +615,36 @@ class MainWindow(QMainWindow):
         self._segment_translation_log.clear()
         self._segment_start_time = time.monotonic()
         self._update_display()
+
+    @Slot()
+    def _on_stt_finished(self) -> None:
+        if self._stopping:
+            return
+
+        self._stt_thread = None
+        self._stt_worker = None
+
+        if self._translator_thread is not None:
+            if self._translator_worker is not None:
+                self._translator_worker.stop()
+                try:
+                    self.translate_requested.disconnect(self._translator_worker.translate_text)
+                except (TypeError, RuntimeError):
+                    pass
+            self._shutdown_qthread(self._translator_thread, "translator thread")
+            self._translator_thread = None
+            self._translator_worker = None
+
+        if not self.status_label.text().startswith("Status: error"):
+            self.status_label.setText("Status: idle")
+
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setText("Pause")
+        self.clear_button.setEnabled(False)
+        self._preparing = False
+        self._paused = False
 
     def _shutdown_qthread(self, thread: QThread, name: str, timeout_ms: int = 7000) -> None:
         thread.quit()
@@ -703,3 +758,5 @@ class MainWindow(QMainWindow):
         self._on_stop_clicked()
         self._settings.save(SETTINGS_PATH)
         super().closeEvent(event)
+
+

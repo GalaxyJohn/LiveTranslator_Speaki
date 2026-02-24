@@ -38,6 +38,36 @@ def _add_lang_items(combo: QComboBox) -> None:
     combo.addItem("Chinese Simplified (zh-CN)", "zh-CN")
 
 
+def _list_audio_devices() -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    inputs: list[tuple[str, int]] = []
+    outputs: list[tuple[str, int]] = []
+    try:
+        import pyaudio
+    except Exception:
+        return inputs, outputs
+
+    pa = pyaudio.PyAudio()
+    try:
+        for idx in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(idx)
+            name = str(info.get("name", "")).strip() or "Unknown device"
+            label = f"[{idx}] {name}"
+
+            if int(info.get("maxInputChannels", 0)) > 0:
+                inputs.append((label, int(idx)))
+            if int(info.get("maxOutputChannels", 0)) > 0:
+                outputs.append((label, int(idx)))
+    except Exception:
+        return [], []
+    finally:
+        try:
+            pa.terminate()
+        except Exception:
+            pass
+
+    return inputs, outputs
+
+
 class AdaptiveStackedWidget(QStackedWidget):
     """Use current page size hint so small pages don't reserve LLM-page height."""
 
@@ -599,6 +629,17 @@ class SettingsDialog(QDialog):
         self.stt_backend_combo.addItem("CPU (compatible)", "cpu")
         t_layout.addWidget(self.stt_backend_combo, 2, 1)
 
+        t_layout.addWidget(QLabel("Input device"), 3, 0)
+        self.input_device_combo = QComboBox()
+        t_layout.addWidget(self.input_device_combo, 3, 1)
+
+        t_layout.addWidget(QLabel("Output device"), 3, 2)
+        self.output_device_combo = QComboBox()
+        t_layout.addWidget(self.output_device_combo, 3, 3)
+
+        self._audio_inputs, self._audio_outputs = _list_audio_devices()
+        self._populate_audio_device_combos()
+
         self.stack = AdaptiveStackedWidget()
         main_layout.addWidget(self.stack)
 
@@ -623,6 +664,26 @@ class SettingsDialog(QDialog):
 
         self._load_from_settings()
 
+    def _populate_audio_device_combos(self) -> None:
+        self.input_device_combo.clear()
+        self.output_device_combo.clear()
+
+        self.input_device_combo.addItem("System default", -1)
+        self.output_device_combo.addItem("System default", -1)
+
+        for label, idx in self._audio_inputs:
+            self.input_device_combo.addItem(label, idx)
+
+        for label, idx in self._audio_outputs:
+            self.output_device_combo.addItem(label, idx)
+
+    def _combo_data_to_int(self, combo: QComboBox, default: int = -1) -> int:
+        value = combo.currentData()
+        try:
+            return int(value)
+        except Exception:
+            return default
+
     def _load_from_settings(self) -> None:
         s = self._settings
 
@@ -642,6 +703,22 @@ class SettingsDialog(QDialog):
         idx = self.stt_backend_combo.findData(stt_backend)
         if idx >= 0:
             self.stt_backend_combo.setCurrentIndex(idx)
+
+        try:
+            input_device_index = int(s.stt.input_device_index)
+        except Exception:
+            input_device_index = -1
+
+        try:
+            output_device_index = int(s.stt.output_device_index)
+        except Exception:
+            output_device_index = -1
+
+        idx = self.input_device_combo.findData(input_device_index)
+        self.input_device_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+        idx = self.output_device_combo.findData(output_device_index)
+        self.output_device_combo.setCurrentIndex(idx if idx >= 0 else 0)
 
         self.deepl_page.load(s.deepl)
         self.deepl_free_page.load(s.deepl_free)
@@ -675,9 +752,12 @@ class SettingsDialog(QDialog):
         s.source_lang = self.source_lang_combo.currentData()
         s.target_lang = self.target_lang_combo.currentData()
         s.stt.backend = self.stt_backend_combo.currentData()
+        s.stt.input_device_index = self._combo_data_to_int(self.input_device_combo, -1)
+        s.stt.output_device_index = self._combo_data_to_int(self.output_device_combo, -1)
 
         self.deepl_page.apply(s.deepl)
         self.deepl_free_page.apply(s.deepl_free)
         self.google_page.apply(s.google)
         self.papago_page.apply(s.papago)
         self.llm_page.apply(s.llm)
+

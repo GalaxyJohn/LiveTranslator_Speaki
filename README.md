@@ -27,4 +27,8 @@ You do **not** need to install FFmpeg separately for normal use in this packaged
 ## Quick Start
 1. Extract the release zip.
 2. Run `speaki.exe` (do not move it out of its folder).
+<<<<<<< Updated upstream
 3. If CUDA fails, switch STT backend to `CPU` in Settings and restart.
+=======
+3. If CUDA fails, switch STT backend to `CPU` in Settings and restart.
+>>>>>>> Stashed changes

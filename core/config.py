@@ -70,6 +70,11 @@ class STTSettings:
     # "cuda" or "cpu"
     backend: str = "cuda"
 
+    # Input/output device indices from PyAudio device list.
+    # -1 means "use system default".
+    input_device_index: int = -1
+    output_device_index: int = -1
+
 
 @dataclass
 class AppSettings:
